@@ -318,6 +318,40 @@ let pendingCommentParas = [];
 let isDraggingCommentPopover = false;
 let commentPopoverDragOffset = { x: 0, y: 0 };
 
+// ── Annotation Undo ──
+const ANNOTATION_UNDO_MAX = 30;
+let annotationUndoStack = [];
+let lastInputSnapshotAt = 0;
+const INPUT_BURST_GAP = 500;
+function pushAnnotationSnapshot() {
+  annotationUndoStack.push({
+    left: editorLeft.innerHTML,
+    right: editorRight.innerHTML
+  });
+  if (annotationUndoStack.length > ANNOTATION_UNDO_MAX) annotationUndoStack.shift();
+}
+function pushInputSnapshotIfNewBurst() {
+  var now = Date.now();
+  if (now - lastInputSnapshotAt > INPUT_BURST_GAP) pushAnnotationSnapshot();
+  lastInputSnapshotAt = now;
+}
+function undoAnnotation() {
+  if (annotationUndoStack.length === 0) { showToast("没有可撤回的操作"); return; }
+  var snap = annotationUndoStack.pop();
+  editorLeft.innerHTML = snap.left;
+  editorRight.innerHTML = snap.right;
+  normalizeEditor(editorLeft);
+  normalizeEditor(editorRight);
+  markCalloutLines(editorLeft);
+  markCalloutLines(editorRight);
+  syncParagraphCount();
+  clearHighlight();
+  updateStatus();
+  // 撤回后重置突发计时，避免新输入和被撤回的状态混淆
+  lastInputSnapshotAt = 0;
+  showToast("已撤回");
+}
+
 // ── Settings ──
 const SETTINGS_KEY = "bilingual-editor-settings";
 function loadSettings() { try { return JSON.parse(localStorage.getItem(SETTINGS_KEY)) || {}; } catch { return {}; } }
@@ -533,8 +567,13 @@ function hideCommentPopover() {
 
 function confirmCommentPopover() {
   var input = document.getElementById("comment-input");
-  applyCalloutToParagraphs(pendingCommentParas, input.value);
+  var comment = input.value;
+  if (!comment || !comment.trim()) { hideCommentPopover(); return; }
+  pushAnnotationSnapshot();
+  applyCalloutToParagraphs(pendingCommentParas, comment);
   hideCommentPopover();
+  // 把焦点移出可编辑区域，这样 Ctrl+Z 能直接触发批注撤回
+  if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
 }
 
 function setupCommentPopoverDrag() {
@@ -759,6 +798,8 @@ function init() {
   editorRight.addEventListener("contextmenu", function(e) { if (e.target.closest(".para")) { e.preventDefault(); onParaClick(e); wrapSelectedLinesAsCallout(e.clientX, e.clientY); } });
   editorLeft.addEventListener("input", onEditorInput);
   editorRight.addEventListener("input", onEditorInput);
+  editorLeft.addEventListener("beforeinput", pushInputSnapshotIfNewBurst);
+  editorRight.addEventListener("beforeinput", pushInputSnapshotIfNewBurst);
   editorLeft.addEventListener("paste", function(e) { handlePlainTextPaste(editorLeft, e); });
   editorRight.addEventListener("paste", function(e) { handlePlainTextPaste(editorRight, e); });
   setupMutationObserver(editorLeft);
@@ -810,6 +851,13 @@ function init() {
   });
   document.addEventListener("keydown", function(e) {
     if (e.key === "Escape") document.querySelectorAll(".modal-overlay.show").forEach(function(o) { o.classList.remove("show"); });
+    if ((e.ctrlKey || e.metaKey) && !e.shiftKey && (e.key === "z" || e.key === "Z")) {
+      var tag = (e.target && e.target.tagName) || "";
+      // 弹窗里的输入框仍交给浏览器原生 Ctrl+Z 处理；编辑器内的撤回由我们的快照栈负责
+      if (tag === "TEXTAREA" || tag === "INPUT") return;
+      e.preventDefault();
+      undoAnnotation();
+    }
   });
   document.addEventListener("mousedown", function(e) {
     var popover = document.getElementById("comment-popover");
